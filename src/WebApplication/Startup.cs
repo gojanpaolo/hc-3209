@@ -1,117 +1,56 @@
 using HotChocolate.Configuration;
 using HotChocolate.Data;
-using HotChocolate.Data.Sorting;
-using HotChocolate.Data.Sorting.Expressions;
+using HotChocolate.Data.Filters;
+using HotChocolate.Data.Filters.Expressions;
 using HotChocolate.Language;
 using HotChocolate.Language.Visitors;
-using HotChocolate.Types;
-using HotChocolate.Types.Descriptors;
 using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Hosting;
-using System;
-using System.Diagnostics.CodeAnalysis;
-using System.Linq;
 using System.Linq.Expressions;
 
-namespace WebApplication
+public record Foo(int FooId);
+
+public record BarService(int BarFooId = 2);
+
+public class Startup
 {
-    public class Startup
+    public void ConfigureServices(IServiceCollection _) => _
+        .AddHttpContextAccessor()
+        .AddScoped<BarService>()
+        .AddGraphQLServer()
+        .AddFiltering(_ => _.AddDefaults().AddProviderExtension(new QueryableFilterProviderExtension(_ => _
+            .AddFieldHandler<FooBarFilterFieldHandler>())))
+        .AddQueryType<Query>();
+
+    public void Configure(IApplicationBuilder app) => app.UseRouting().UseEndpoints(_ => _.MapGraphQL());
+}
+
+public class Query
+{
+    [UseFiltering(typeof(FooFilterInputType))]
+    public Foo[] GetFoos() => new[] { new Foo(1), new Foo(2), new Foo(3) };
+}
+
+public class FooFilterInputType : FilterInputType<Foo>
+{
+    protected override void Configure(IFilterInputTypeDescriptor<Foo> descriptor) => descriptor.Field("bar").Type<BooleanOperationFilterInputType>();
+}
+
+public class FooBarFilterFieldHandler : FilterFieldHandler<QueryableFilterContext, Expression>
+{
+    private readonly IHttpContextAccessor _httpContextAccessor;
+
+    public FooBarFilterFieldHandler(IHttpContextAccessor httpContextAccessor) => _httpContextAccessor = httpContextAccessor;
+
+    public override bool CanHandle(ITypeCompletionContext context, IFilterInputTypeDefinition typeDefinition, IFilterFieldDefinition fieldDefinition) => fieldDefinition is FilterFieldDefinition { Name: { Value: "bar" } };
+
+    public override bool TryHandleEnter(QueryableFilterContext context, IFilterField field, ObjectFieldNode node, out ISyntaxVisitorAction action)
     {
-        public void ConfigureServices(IServiceCollection services)
-        {
-            services
-                .AddGraphQLServer()
-                .AddSorting<CustomSortConvention>()
-                .AddQueryType<Query>()
-                .AddType<FooSortInputType>();
-        }
-
-        public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
-        {
-            if (env.IsDevelopment())
-                app.UseDeveloperExceptionPage();
-
-            app.UseHttpsRedirection();
-
-            app.UseRouting();
-
-            app.UseEndpoints(_ => _.MapGraphQL());
-        }
-    }
-
-    public class Query
-    {
-        [UseSorting]
-        public IQueryable<Foo> GetFoo() => Enumerable.Empty<Foo>().AsQueryable();
-    }
-
-    public class Foo
-    {
-        public int Id { get; set; }
-
-        public string Name { get; set; }
-    }
-
-    public class FooSortInputType : SortInputType<Foo>
-    {
-        protected override void Configure(ISortInputTypeDescriptor<Foo> descriptor)
-        {
-            descriptor.Field(_ => _.Name);
-            descriptor
-                .Field("bar")
-                .Type<FooBarSortInputType>();
-        }
-    }
-
-    public class CustomSortConvention : SortConvention
-    {
-        protected override void Configure(ISortConventionDescriptor descriptor)
-        {
-            descriptor.AddDefaults();
-
-            descriptor
-                .AddProviderExtension(
-                    new QueryableSortProviderExtension(_ => _
-                        .AddFieldHandler(new FooBarSortHandler())));
-        }
-    }
-
-    public class FooBarSortInputType : SortInputType
-    {
-        protected override void Configure(ISortInputTypeDescriptor descriptor)
-        {
-            descriptor.Name("FooBarSortInput");
-            descriptor.Field("id").Type<NonNullType<StringType>>();
-            descriptor.Field("sort").Type<DefaultSortEnumType>();
-        }
-    }
-
-    public class FooBarSortHandler : QueryableDefaultSortFieldHandler
-    {
-        public override bool CanHandle(
-            ITypeCompletionContext context,
-            ISortInputTypeDefinition typeDefinition,
-            ISortFieldDefinition fieldDefinition) =>
-            typeDefinition is SortInputTypeDefinition { Name: { Value: "FooBarSortInput" } }
-            || (fieldDefinition is SortFieldDefinition sortFieldDefinition
-                && sortFieldDefinition.Type is ExtendedTypeReference extendedTypeReference
-                && extendedTypeReference.Type.Type == typeof(FooBarSortInputType));
-
-        public override bool TryHandleEnter(QueryableSortContext context, ISortField field, ObjectFieldNode node, [NotNullWhen(true)] out ISyntaxVisitorAction action)
-        {
-            if (field.Name == "id")
-            {
-                // in our actual code, this has some complex logic that ultimately returns a bool and we sort by `true/1` and `false/0`
-                Expression<Func<Foo, bool>> expression = _ => true;
-                var lastFieldSelector = (QueryableFieldSelector)context.GetInstance();
-                var nextSelector = Expression.Invoke(expression, lastFieldSelector.Selector);
-                context.PushInstance(lastFieldSelector.WithSelector(nextSelector));
-            }
-
-            action = SyntaxVisitor.Continue;
-            return true;
-        }
+        var barService = _httpContextAccessor.HttpContext.RequestServices.GetRequiredService<BarService>();
+        var fooId = Expression.Property(context.GetInstance(), nameof(Foo.FooId));
+        context.PushInstance(FilterExpressionBuilder.Equals(fooId, barService.BarFooId));
+        action = SyntaxVisitor.Continue;
+        return true;
     }
 }
